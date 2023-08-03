@@ -7,10 +7,9 @@ import core.logger as Logger
 import core.metrics as Metrics
 # from tensorboardX import SummaryWriter
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 
-print(torch.__version__, torch.version.cuda)
+print(torch.version.cuda)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -23,8 +22,7 @@ if __name__ == "__main__":
 
     # parse configs
     args = parser.parse_args()
-    print(args)
-    opt = Logger.parse(args, stage=1)
+    opt = Logger.parse(args)
     # Convert to NoneDict, which return None for missing key.
     opt = Logger.dict_to_nonedict(opt)
 
@@ -36,33 +34,37 @@ if __name__ == "__main__":
                         'train', level=logging.INFO, screen=True)
     Logger.setup_logger('val', opt['path']['log'], 'val', level=logging.INFO)
     logger = logging.getLogger('base')
-    logger.info('[Phase 1] Training noise model!')
+    logger.info(Logger.dict2str(opt))
+
+    stage2_file = opt['stage2_file']
 
     # dataset
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train' and args.phase != 'val':
-            train_set = Data.create_dataset(dataset_opt, phase)
+            train_set = Data.create_dataset(dataset_opt, phase, stage2_file=stage2_file)
             train_loader = Data.create_dataloader(
                 train_set, dataset_opt, phase)
         elif phase == 'val':
-            val_set = Data.create_dataset(dataset_opt, phase)
+            val_set = Data.create_dataset(dataset_opt, phase, stage2_file=stage2_file)
             val_loader = Data.create_dataloader(
                 val_set, dataset_opt, phase)
     logger.info('Initial Dataset Finished')
 
     # model
-    trainer = Model.create_noise_model(opt)
+    diffusion = Model.create_model(opt)
     logger.info('Initial Model Finished')
 
     # Train
-    current_step = trainer.begin_step
-    current_epoch = trainer.begin_epoch
-    n_iter = opt['noise_model']['n_iter']
+    current_step = diffusion.begin_step
+    current_epoch = diffusion.begin_epoch
+    n_iter = opt['train']['n_iter']
 
     if opt['path']['resume_state']:
         logger.info('Resuming training from epoch: {}, iter: {}.'.format(
             current_epoch, current_step))
 
+    diffusion.set_new_noise_schedule(
+        opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
     if opt['phase'] == 'train':
         while current_step < n_iter:
             current_epoch += 1
@@ -70,11 +72,11 @@ if __name__ == "__main__":
                 current_step += 1
                 if current_step > n_iter:
                     break
-                trainer.feed_data(train_data)
-                trainer.optimize_parameters()
+                diffusion.feed_data(train_data)
+                diffusion.optimize_parameters()
                 # log
-                if current_step % opt['noise_model']['print_freq'] == 0:
-                    logs = trainer.get_current_log()
+                if current_step % opt['train']['print_freq'] == 0:
+                    logs = diffusion.get_current_log()
                     message = '<epoch:{:3d}, iter:{:8,d}> '.format(
                         current_epoch, current_step)
                     for k, v in logs.items():
@@ -82,45 +84,21 @@ if __name__ == "__main__":
                     logger.info(message)
 
                 # validation
-                if current_step % opt['noise_model']['val_freq'] == 0:
+                if current_step % opt['train']['val_freq'] == 0:
                     avg_psnr = 0.0
                     idx = 0
                     result_path = '{}/{}'.format(opt['path']
                                                  ['results'], current_epoch)
                     os.makedirs(result_path, exist_ok=True)
 
+                    diffusion.set_new_noise_schedule(
+                        opt['model']['beta_schedule']['val'], schedule_phase='val')
                     for _,  val_data in enumerate(val_loader):
                         idx += 1
-                        trainer.feed_data(val_data)
-                        trainer.test(continous=True)
+                        diffusion.feed_data(val_data)
+                        diffusion.test(continous=True)
                         
-                        visuals = trainer.get_current_visuals()
-                        orig = visuals['X']
-                        den = visuals['denoised']
-                        orig=orig[0,0,:,:]
-                        den=den[0,0,:,:]
-                        # computes the residuals
-                        rms_diff = np.sqrt((orig - den) ** 2)
-
-                        fig1, ax = plt.subplots(1, 3, figsize=(12, 6),
-                                                subplot_kw={'xticks': [], 'yticks': []})
-
-                        fig1.subplots_adjust(hspace=0.3, wspace=0.05)
-
-                        ax.flat[0].imshow(orig.T, cmap='gray', interpolation='none',
-                                        origin='lower')
-                        ax.flat[0].set_title('Original')
-                        ax.flat[1].imshow(den.T, cmap='gray', interpolation='none',
-                                        origin='lower')
-                        ax.flat[1].set_title('Denoised Output')
-                        ax.flat[2].imshow(rms_diff.T, cmap='gray', interpolation='none',
-                                        origin='lower')
-                        ax.flat[2].set_title('Residuals')
-
-                        fig1.savefig('{}/{}_{}_compdenoised.png'.format(result_path, current_step, idx))
-
-                        print("The result saved in denoised_patch2self.png")
-
+                        visuals = diffusion.get_current_visuals()
 
                         denoised_img = Metrics.tensor2img(visuals['denoised'])  # uint8
                         input_img = Metrics.tensor2img(visuals['X'])  # uint8
@@ -129,9 +107,48 @@ if __name__ == "__main__":
                             denoised_img[:,:], '{}/{}_{}_denoised.png'.format(result_path, current_step, idx))
                         Metrics.save_img(
                             input_img[:,:], '{}/{}_{}_input.png'.format(result_path, current_step, idx))
-
-                if current_step % opt['noise_model']['save_checkpoint_freq'] == 0:
+  
+                    diffusion.set_new_noise_schedule(
+                        opt['model']['beta_schedule']['train'], schedule_phase='train')
+   
+                if current_step % opt['train']['save_checkpoint_freq'] == 0:
                     logger.info('Saving models and training states.')
-                    trainer.save_network(current_epoch, current_step, save_last_only=True)
+                    diffusion.save_network(current_epoch, current_step, save_last_only=True)
+
+                # if current_step % 1e4 == 0:
+                #     logger.info('Saving models and training states.')
+                #     diffusion.save_network(current_epoch, current_step, save_last_only=False)
         # save model
         logger.info('End of training.')
+    else:
+        logger.info('Begin Model Evaluation.')
+        avg_psnr = 0.0
+        avg_ssim = 0.0
+        idx = 0
+        result_path = '{}'.format(opt['path']['results'])
+        os.makedirs(result_path, exist_ok=True)
+        for _,  val_data in enumerate(val_loader):
+            idx += 1
+            diffusion.feed_data(val_data)
+            diffusion.test(continous=True)
+            visuals = diffusion.get_current_visuals()
+
+            denoised_img = Metrics.tensor2img(visuals['denoised'])  # uint8
+            input_img = Metrics.tensor2img(visuals['X'])  # uint8
+
+            sr_img_mode = 'grid'
+            # grid img
+            sr_img = Metrics.tensor2img(visuals['denoised'], out_type=np.float)  # uint8
+            Metrics.save_img(
+                sr_img, '{}/{}_{}_denoised.png'.format(result_path, current_step, idx))
+            Metrics.save_img(
+                Metrics.tensor2img(visuals['denoised'][-1], out_type=np.float), '{}/{}_{}_denoised.png'.format(result_path, current_step, idx))
+        
+            Metrics.save_img(
+                denoised_img, '{}/{}_{}_lr.png'.format(result_path, current_step, idx))
+            Metrics.save_img(
+                input_img, '{}/{}_{}_input.png'.format(result_path, current_step, idx))
+
+        logger_val = logging.getLogger('val')  # validation logger
+        logger_val.info('<epoch:{:3d}, iter:{:8,d}>'.format(
+            current_epoch, current_step))
