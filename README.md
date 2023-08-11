@@ -2,7 +2,6 @@
 
 Cited Paper: https://arxiv.org/pdf/2302.03018.pdf
 
-![result](./assets/100000_1_denoised.png)
 
 ## Dependencies
 
