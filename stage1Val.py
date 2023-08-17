@@ -43,7 +43,7 @@ def compare_images(imageA, imageB, imageC,title):
     # compute the mean squared error and structural similarity
     # index for the images
     m = mse(imageA, imageB)
-    s = ssim(imageA, imageB,)
+    s = ssim(imageA, imageB,0.9)
     # setup the figure
     fig = plt.figure(title)
     plt.suptitle("MSE: %.2f, SSIM: %.2f" % (m, s))
